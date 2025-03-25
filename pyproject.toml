@@ -1,0 +1,128 @@
+[project]
+name = "lean-docker-mcp"
+version = "0.1.0"
+description = "Dockerised Lean4 execution environment for AI agents"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+keywords = ["docker", "lean", "lean4", "execution", "sandbox", "agent", "mcp"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Software Development :: Testing",
+]
+dependencies = [
+    "docker>=7.1.0",
+    "mcp>=1.5.0",
+    "pyyaml>=6.0.2",
+    "setuptools>=77.0.3",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/artivus/lean-docker-mcp"
+"Bug Tracker" = "https://github.com/artivus/lean-docker-mcp/issues"
+
+[[project.authors]]
+name = "Shannon Sands"
+email = "shannon.sands.1979@gmail.com"
+
+[project.optional-dependencies]
+dev = [
+    "pre-commit>=4.2.0",
+    "pytest>=8.3.5",
+    "pytest-asyncio>=0.25.3",
+    "pytest-cov>=6.0.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project.scripts]
+lean-docker-mcp = "lean_docker_mcp:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lean_docker_mcp"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/lean_docker_mcp/*.py",
+    "src/lean_docker_mcp/*.yaml",
+    "src/lean_docker_mcp/Dockerfile",
+    "README.md",
+    "LICENSE",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_classes = ["Test*", "*Test"]
+python_functions = ["test_*"]
+addopts = "--cov=src/lean_docker_mcp --cov-report=term"
+asyncio_mode = "auto"
+asyncio_fixture_loop_scope = "function"
+
+[tool.coverage.run]
+source = ["src/lean_docker_mcp"]
+omit = ["*/tests/*", "*/migrations/*"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "pass",
+    "raise ImportError",
+]
+fail_under = 80
+
+# Black configuration
+[tool.black]
+line-length = 160
+target-version = ["py311"]
+include = '\.pyi?$'
+exclude = '''
+/(
+    \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | _build
+  | buck-out
+  | build
+  | dist
+)/
+'''
+
+# isort configuration to match black
+[tool.isort]
+profile = "black"
+line_length = 160
+
+# mypy configuration
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = false
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = false
+no_implicit_optional = true
+strict_optional = false
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = false
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+disallow_incomplete_defs = false

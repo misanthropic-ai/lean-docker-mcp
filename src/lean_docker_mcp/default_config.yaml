@@ -1,0 +1,24 @@
+docker:
+  image: lean-docker-mcp:latest
+  working_dir: /home/leanuser/project
+  memory_limit: 256m
+  cpu_limit: 0.5
+  timeout: 30
+  network_disabled: true
+  read_only: false
+
+lean:
+  allowed_imports:
+    - Lean
+    - Init
+    - Std
+    - Mathlib
+  blocked_imports:
+    - System.IO.Process
+    - System.FilePath
+
+# Package installation is not supported yet for Lean4 MCP
+# package:
+#   installer: elan  
+#   index_url: null
+#   trusted_hosts: [] 
