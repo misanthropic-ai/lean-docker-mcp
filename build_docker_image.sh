@@ -37,8 +37,8 @@ if [ ! -f "$dockerfile_path" ]; then
     exit 1
 fi
 
-# Build the Docker image
-docker build -t "$image_name:$tag" -f "$dockerfile_path" .
+# Build the Docker image - context should be at the directory level of the Dockerfile
+docker build -t "$image_name:$tag" -f "$dockerfile_path" src/lean_docker_mcp
 
 echo "Image $image_name:$tag built successfully!"
 echo

@@ -5,6 +5,14 @@
         "args": [
           "ddg-mcp"
         ]
+      },
+      "lean-mcp": {
+        "command": "uv",
+        "args": [
+          "run",
+          "-m",
+          "lean_docker_mcp"
+        ]
       }
     }
 }

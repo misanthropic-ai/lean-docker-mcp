@@ -5,279 +5,224 @@ import json
 import logging
 import sys
 import uuid
-from typing import Any, Dict, List, Optional, Tuple, Union, cast
+from typing import Any, Dict, List, Optional, cast
+
+import mcp.server.stdio
+import mcp.types as types
+from mcp.server import NotificationOptions, Server
+from mcp.server.models import InitializationOptions
+from pydantic import AnyUrl
 
 from .config import Configuration, load_config
 from .docker_manager import DockerExecutionError, DockerManager, LeanCompilationError, LeanValidationError
 
 # Set up logging
-logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("lean-docker-mcp")
+
+# Initialize the configuration
+config = load_config()
+
+# Initialize the Docker manager
+docker_manager = DockerManager(config)
+
+# Store sessions for persistent code execution environments
+sessions = {}
+
+# Create the MCP server
+server = Server("lean-docker-mcp")
 
 
-class JsonRpcError(Exception):
-    """JSON-RPC error."""
+@server.list_resources()
+async def handle_list_resources() -> list[types.Resource]:
+    """List available resources.
 
-    def __init__(self, code: int, message: str, data: Optional[Any] = None):
-        """Initialize the error.
-
-        Args:
-            code: The error code
-            message: The error message
-            data: Optional additional data
-        """
-        self.code = code
-        self.message = message
-        self.data = data
-        super().__init__(message)
+    Currently there are no resources to list.
+    """
+    return []
 
 
-class Server:
-    """MCP JSON-RPC server."""
+@server.read_resource()
+async def handle_read_resource(uri: AnyUrl) -> str:
+    """Read a specific resource by its URI.
 
-    def __init__(self, config: Optional[Configuration] = None):
-        """Initialize the server.
+    Currently there are no resources to read.
+    """
+    raise ValueError(f"Unsupported resource URI: {uri}")
 
-        Args:
-            config: Optional configuration override
-        """
-        self.config = config or load_config()
-        self.docker_manager = DockerManager(self.config)
 
-    async def handle_request(self, request: Dict[str, Any]) -> Dict[str, Any]:
-        """Handle a JSON-RPC request.
+@server.list_prompts()
+async def handle_list_prompts() -> list[types.Prompt]:
+    """List available prompts.
 
-        Args:
-            request: The JSON-RPC request
+    Currently there are no prompts defined.
+    """
+    return []
 
-        Returns:
-            The JSON-RPC response
-        """
-        # Extract request information
-        request_id = request.get("id")
-        method = request.get("method")
-        params = request.get("params", {})
 
-        logger.debug(f"Received request: {request}")
+@server.get_prompt()
+async def handle_get_prompt(name: str, arguments: dict[str, str] | None) -> types.GetPromptResult:
+    """Generate a prompt.
 
-        # Prepare response structure
-        response = {
-            "jsonrpc": "2.0",
-            "id": request_id,
-        }
+    Currently there are no prompts defined.
+    """
+    raise ValueError(f"Unknown prompt: {name}")
 
-        try:
-            # Validate the request
-            if not isinstance(request_id, (str, int, type(None))):
-                raise JsonRpcError(-32600, "Invalid request: id must be a string, number, or null")
-            if not method:
-                raise JsonRpcError(-32600, "Invalid request: method is required")
-            if not isinstance(params, dict):
-                raise JsonRpcError(-32602, "Invalid params: params must be an object")
 
-            # Dispatch the method
-            if method == "execute-lean":
-                result = await self._handle_execute_lean(params)
-            elif method == "execute-lean-persistent":
-                result = await self._handle_execute_lean_persistent(params)
-            elif method == "cleanup-session":
-                result = await self._handle_cleanup_session(params)
-            else:
-                raise JsonRpcError(-32601, f"Method not found: {method}")
+@server.list_tools()
+async def handle_list_tools() -> list[types.Tool]:
+    """List available tools that can be called by clients."""
+    logger.info("Listing tools")
+    return [
+        types.Tool(
+            name="execute-lean",
+            description="Execute Lean4 code in a transient Docker container",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "code": {"type": "string", "description": "Lean4 code to execute"},
+                },
+                "required": ["code"],
+            },
+        ),
+        types.Tool(
+            name="execute-lean-persistent",
+            description="Execute Lean4 code in a persistent Docker container",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "code": {"type": "string", "description": "Lean4 code to execute"},
+                    "session_id": {"type": "string", "description": "Session identifier"},
+                },
+                "required": ["code"],
+            },
+        ),
+        types.Tool(
+            name="cleanup-session",
+            description="Clean up a persistent session and its resources",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string", "description": "Session identifier"},
+                },
+                "required": ["session_id"],
+            },
+        ),
+    ]
 
-            # Add the result to the response
-            response["result"] = result
 
-        except JsonRpcError as e:
-            # Handle JSON-RPC errors
-            response["error"] = {
-                "code": e.code,
-                "message": e.message,
-            }
-            if e.data:
-                response["error"]["data"] = e.data
-        except LeanValidationError as e:
-            # Handle Lean validation errors
-            response["error"] = {
-                "code": -32001,
-                "message": str(e),
-                "data": {
-                    "error_type": "validation_error"
-                }
-            }
-        except LeanCompilationError as e:
-            # Handle Lean compilation errors
-            response["error"] = {
-                "code": -32002,
-                "message": str(e),
-                "data": e.to_dict()
-            }
-        except DockerExecutionError as e:
-            # Handle Docker execution errors
-            response["error"] = {
-                "code": -32000,
-                "message": str(e),
-            }
-        except Exception as e:
-            # Handle all other errors
-            logger.exception(f"Unexpected error: {e}")
-            response["error"] = {
-                "code": -32603,
-                "message": f"Internal error: {str(e)}",
-            }
+@server.call_tool()
+async def handle_call_tool(name: str, arguments: dict | None) -> list[types.TextContent | types.ImageContent | types.EmbeddedResource]:
+    """Handle tool execution requests for Lean4 code execution."""
+    logger.info(f"Calling tool: {name}")
 
-        return response
+    if not arguments:
+        raise ValueError("Missing arguments")
 
-    async def _handle_execute_lean(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Handle the execute-lean method.
+    if name == "execute-lean":
+        code = arguments.get("code")
 
-        Args:
-            params: The method parameters
-
-        Returns:
-            The result with stdout, error information, and status
-        """
-        # Validate parameters
-        code = params.get("code")
         if not code:
-            raise JsonRpcError(-32602, "Invalid params: code is required")
-        if not isinstance(code, str):
-            raise JsonRpcError(-32602, "Invalid params: code must be a string")
+            raise ValueError("Missing code")
 
-        # Execute the code in a transient container
-        result = await self.docker_manager.execute_transient(code)
-        return result
+        result = await docker_manager.execute_transient(code)
 
-    async def _handle_execute_lean_persistent(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Handle the execute-lean-persistent method.
+        # Format text result
+        formatted_text = _format_execution_result(result)
 
-        Args:
-            params: The method parameters
+        return [types.TextContent(type="text", text=formatted_text)]
 
-        Returns:
-            The result with stdout, error information, status, and session ID
-        """
-        # Validate parameters
-        code = params.get("code")
+    elif name == "execute-lean-persistent":
+        code = arguments.get("code")
+        session_id = arguments.get("session_id")
+
         if not code:
-            raise JsonRpcError(-32602, "Invalid params: code is required")
-        if not isinstance(code, str):
-            raise JsonRpcError(-32602, "Invalid params: code must be a string")
+            raise ValueError("Missing code")
 
-        # Get or generate a session ID
-        session_id = params.get("session_id")
+        # Create a new session if not provided
         if not session_id:
             session_id = str(uuid.uuid4())
+            sessions[session_id] = {"created_at": asyncio.get_event_loop().time()}
 
-        # Execute the code in a persistent container
-        result = await self.docker_manager.execute_persistent(session_id, code)
-        
-        # Ensure the session ID is included in the result (should already be there)
-        if "session_id" not in result:
-            result["session_id"] = session_id
-        
-        return result
+        result = await docker_manager.execute_persistent(session_id, code)
 
-    async def _handle_cleanup_session(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Handle the cleanup-session method.
+        # Format text result
+        formatted_text = _format_execution_result(result, session_id)
 
-        Args:
-            params: The method parameters
+        return [types.TextContent(type="text", text=formatted_text)]
 
-        Returns:
-            The result
-        """
-        # Validate parameters
-        session_id = params.get("session_id")
+    elif name == "cleanup-session":
+        session_id = arguments.get("session_id")
+
         if not session_id:
-            raise JsonRpcError(-32602, "Invalid params: session_id is required")
-        if not isinstance(session_id, str):
-            raise JsonRpcError(-32602, "Invalid params: session_id must be a string")
+            raise ValueError("Missing session ID")
 
-        # Clean up the session
-        result = await self.docker_manager.cleanup_session(session_id)
-        return result
+        result = await docker_manager.cleanup_session(session_id)
 
+        if session_id in sessions:
+            del sessions[session_id]
 
-async def read_request() -> Optional[Dict[str, Any]]:
-    """Read a JSON-RPC request from stdin.
+        return [
+            types.TextContent(
+                type="text",
+                text=f"Session {session_id} cleaned up successfully: {result['message']}",
+            )
+        ]
 
-    Returns:
-        The parsed request, or None if EOF is reached
-    """
-    try:
-        # Read the Content-Length header
-        content_length = None
-        while True:
-            line = await asyncio.get_event_loop().run_in_executor(None, sys.stdin.readline)
-            if not line:
-                return None  # EOF
-            line = line.strip()
-            if not line:
-                break  # Empty line - end of headers
-            if line.startswith("Content-Length: "):
-                content_length = int(line[16:])
-
-        if content_length is None:
-            logger.error("Missing Content-Length header")
-            return None
-
-        # Read the request body
-        request_body = await asyncio.get_event_loop().run_in_executor(
-            None, lambda: sys.stdin.buffer.read(content_length).decode("utf-8")
-        )
-        if not request_body:
-            return None  # EOF
-
-        # Parse the request
-        return json.loads(request_body)
-    except Exception as e:
-        logger.error(f"Error reading request: {e}")
-        return None
+    else:
+        raise ValueError(f"Unknown tool: {name}")
 
 
-async def write_response(response: Dict[str, Any]) -> None:
-    """Write a JSON-RPC response to stdout.
+def _format_execution_result(result: Dict[str, Any], session_id: Optional[str] = None) -> str:
+    """Format execution result for display."""
+    # Extract relevant information from the result
+    stdout = result.get("stdout", "")
+    error = result.get("error", "")
+    status = result.get("status", "")
+    exit_code = result.get("exit_code", -1)
 
-    Args:
-        response: The response to write
-    """
-    try:
-        # Convert the response to JSON
-        response_json = json.dumps(response)
-        response_bytes = response_json.encode("utf-8")
-
-        # Write the Content-Length header
-        header = f"Content-Length: {len(response_bytes)}\r\n\r\n"
-        sys.stdout.buffer.write(header.encode("utf-8"))
-
-        # Write the response body
-        sys.stdout.buffer.write(response_bytes)
-        sys.stdout.buffer.flush()
-    except Exception as e:
-        logger.error(f"Error writing response: {e}")
+    # Build the response text
+    session_text = f"Session ID: {session_id}\n\n" if session_id else ""
+    status_text = f"Status: {status}\n"
+    exit_code_text = f"Exit Code: {exit_code}\n\n" if exit_code is not None else ""
+    
+    output_text = f"Output:\n{stdout}" if stdout else "No output"
+    
+    error_text = f"\n\nError: {error}" if error else ""
+    
+    return f"{session_text}{status_text}{exit_code_text}{output_text}{error_text}"
 
 
 async def main() -> None:
     """Start the MCP server."""
-    # Initialize the server
-    server = Server()
+    if "--debug" in sys.argv:
+        logging.basicConfig(level=logging.DEBUG)
+        logger.setLevel(logging.DEBUG)
+        logger.debug("Debug mode enabled")
 
+    # Run the server using stdin/stdout streams
     try:
-        # Process requests until EOF
-        while True:
-            request = await read_request()
-            if request is None:
-                break
-
-            # Handle the request
-            response = await server.handle_request(request)
-
-            # Write the response
-            await write_response(response)
-
-    except Exception as e:
-        logger.error(f"Unhandled error: {e}", exc_info=True)
-        sys.exit(1)
+        async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
+            await server.run(
+                read_stream,
+                write_stream,
+                InitializationOptions(
+                    server_name="lean-docker-mcp",
+                    server_version="0.1.0",
+                    capabilities=server.get_capabilities(
+                        notification_options=NotificationOptions(),
+                        experimental_capabilities={},
+                    ),
+                ),
+            )
+    finally:
+        # Clean up any remaining sessions when the server shuts down
+        logger.info("Cleaning up sessions")
+        for session_id in list(sessions.keys()):
+            try:
+                await docker_manager.cleanup_session(session_id)
+            except Exception as e:
+                logger.error(f"Error cleaning up session {session_id}: {e}")
 
 
 # If this module is run directly, start the server
