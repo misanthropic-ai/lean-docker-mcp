@@ -74,11 +74,11 @@ The server implements two types of execution environments:
 
 The server provides the following tools:
 
-- **execute-transient**: Run Lean4 code in a transient Docker container
+- **execute-lean**: Run Lean4 code in a transient Docker container
   - Takes `code` (required) parameter
   - Returns execution results
 
-- **execute-persistent**: Run Lean4 code in a persistent Docker container
+- **execute-lean-persistent**: Run Lean4 code in a persistent Docker container
   - Takes `code` (required) and `session_id` (optional) parameters
   - Returns execution results
   - Maintains state between calls
@@ -174,7 +174,7 @@ On Windows: `%APPDATA%/Claude/claude_desktop_config.json`
 
 ```
 # Define and use a simple function
-result = await call_tool("execute-transient", {
+result = await call_tool("execute-lean", {
   "code": "def hello (name : String) : String := s!\"Hello, {name}\"\n\ndef main : IO Unit := IO.println (hello \"Lean4!\")"
 })
 ```
@@ -183,12 +183,12 @@ result = await call_tool("execute-transient", {
 
 ```
 # Create a persistent session and define a function
-result = await call_tool("execute-persistent", {
+result = await call_tool("execute-lean-persistent", {
   "code": "def add (a b : Nat) : Nat := a + b\n\ndef main : IO Unit := IO.println \"Function defined\""
 })
 
 # Use the function in a subsequent call with the same session
-result = await call_tool("execute-persistent", {
+result = await call_tool("execute-lean-persistent", {
   "session_id": "previous_session_id",
   "code": "def main : IO Unit := IO.println (toString (add 10 20))"
 })

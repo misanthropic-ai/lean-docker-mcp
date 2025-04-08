@@ -8,7 +8,7 @@ import uuid
 from typing import Any, Dict, List, Optional, Tuple, Union, cast
 
 from .config import Configuration, load_config
-from .docker_manager import DockerExecutionError, DockerManager
+from .docker_manager import DockerExecutionError, DockerManager, LeanCompilationError, LeanValidationError
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -75,10 +75,10 @@ class Server:
                 raise JsonRpcError(-32602, "Invalid params: params must be an object")
 
             # Dispatch the method
-            if method == "execute-transient":
-                result = await self._handle_execute_transient(params)
-            elif method == "execute-persistent":
-                result = await self._handle_execute_persistent(params)
+            if method == "execute-lean":
+                result = await self._handle_execute_lean(params)
+            elif method == "execute-lean-persistent":
+                result = await self._handle_execute_lean_persistent(params)
             elif method == "cleanup-session":
                 result = await self._handle_cleanup_session(params)
             else:
@@ -95,6 +95,22 @@ class Server:
             }
             if e.data:
                 response["error"]["data"] = e.data
+        except LeanValidationError as e:
+            # Handle Lean validation errors
+            response["error"] = {
+                "code": -32001,
+                "message": str(e),
+                "data": {
+                    "error_type": "validation_error"
+                }
+            }
+        except LeanCompilationError as e:
+            # Handle Lean compilation errors
+            response["error"] = {
+                "code": -32002,
+                "message": str(e),
+                "data": e.to_dict()
+            }
         except DockerExecutionError as e:
             # Handle Docker execution errors
             response["error"] = {
@@ -111,14 +127,14 @@ class Server:
 
         return response
 
-    async def _handle_execute_transient(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Handle the execute-transient method.
+    async def _handle_execute_lean(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle the execute-lean method.
 
         Args:
             params: The method parameters
 
         Returns:
-            The result
+            The result with stdout, error information, and status
         """
         # Validate parameters
         code = params.get("code")
@@ -131,14 +147,14 @@ class Server:
         result = await self.docker_manager.execute_transient(code)
         return result
 
-    async def _handle_execute_persistent(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Handle the execute-persistent method.
+    async def _handle_execute_lean_persistent(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle the execute-lean-persistent method.
 
         Args:
             params: The method parameters
 
         Returns:
-            The result
+            The result with stdout, error information, status, and session ID
         """
         # Validate parameters
         code = params.get("code")
@@ -155,8 +171,9 @@ class Server:
         # Execute the code in a persistent container
         result = await self.docker_manager.execute_persistent(session_id, code)
         
-        # Add the session ID to the result
-        result["session_id"] = session_id
+        # Ensure the session ID is included in the result (should already be there)
+        if "session_id" not in result:
+            result["session_id"] = session_id
         
         return result
 

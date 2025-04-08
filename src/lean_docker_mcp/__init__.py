@@ -17,8 +17,12 @@ from .config import load_config
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("lean-docker-mcp")
 
-# Package version - must match the version in pyproject.toml
+# Package metadata
 __version__ = "0.1.0"
+__title__ = "lean-docker-mcp"
+__description__ = "A server for executing Lean code in isolated Docker containers"
+__author__ = "Artivus Team"
+__license__ = "MIT"
 
 
 def check_docker_image_exists(image_name: str) -> bool:
@@ -82,4 +86,14 @@ def main() -> None:
 
 
 # Expose important items at package level
-__all__ = ["main", "server", "config", "docker_manager", "__version__"] 
+__all__ = [
+    "main", 
+    "server", 
+    "config", 
+    "docker_manager", 
+    "__version__",
+    "__title__",
+    "__description__",
+    "__author__",
+    "__license__",
+] 

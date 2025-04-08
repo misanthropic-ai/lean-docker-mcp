@@ -1,0 +1,10 @@
+{
+    "mcpServers": {
+      "ddg-mcp": {
+        "command": "uvx",
+        "args": [
+          "ddg-mcp"
+        ]
+      }
+    }
+}
