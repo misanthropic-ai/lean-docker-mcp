@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import os
 import sys
 import uuid
 from typing import Any, Dict, List, Optional, cast
@@ -119,58 +120,67 @@ async def handle_call_tool(name: str, arguments: dict | None) -> list[types.Text
     if not arguments:
         raise ValueError("Missing arguments")
 
-    if name == "execute-lean":
-        code = arguments.get("code")
+    try:
+        if name == "execute-lean":
+            code = arguments.get("code")
 
-        if not code:
-            raise ValueError("Missing code")
+            if not code:
+                raise ValueError("Missing code")
 
-        result = await docker_manager.execute_transient(code)
+            result = await docker_manager.execute_transient(code)
 
-        # Format text result
-        formatted_text = _format_execution_result(result)
+            # Format text result
+            formatted_text = _format_execution_result(result)
 
-        return [types.TextContent(type="text", text=formatted_text)]
+            return [types.TextContent(type="text", text=formatted_text)]
 
-    elif name == "execute-lean-persistent":
-        code = arguments.get("code")
-        session_id = arguments.get("session_id")
+        elif name == "execute-lean-persistent":
+            code = arguments.get("code")
+            session_id = arguments.get("session_id")
 
-        if not code:
-            raise ValueError("Missing code")
+            if not code:
+                raise ValueError("Missing code")
 
-        # Create a new session if not provided
-        if not session_id:
-            session_id = str(uuid.uuid4())
-            sessions[session_id] = {"created_at": asyncio.get_event_loop().time()}
+            # Create a new session if not provided
+            if not session_id:
+                session_id = str(uuid.uuid4())
+                sessions[session_id] = {"created_at": asyncio.get_event_loop().time()}
 
-        result = await docker_manager.execute_persistent(session_id, code)
+            result = await docker_manager.execute_persistent(session_id, code)
 
-        # Format text result
-        formatted_text = _format_execution_result(result, session_id)
+            # Format text result
+            formatted_text = _format_execution_result(result, session_id)
 
-        return [types.TextContent(type="text", text=formatted_text)]
+            return [types.TextContent(type="text", text=formatted_text)]
 
-    elif name == "cleanup-session":
-        session_id = arguments.get("session_id")
+        elif name == "cleanup-session":
+            session_id = arguments.get("session_id")
 
-        if not session_id:
-            raise ValueError("Missing session ID")
+            if not session_id:
+                raise ValueError("Missing session ID")
 
-        result = await docker_manager.cleanup_session(session_id)
+            result = await docker_manager.cleanup_session(session_id)
 
-        if session_id in sessions:
-            del sessions[session_id]
+            if session_id in sessions:
+                del sessions[session_id]
 
-        return [
-            types.TextContent(
-                type="text",
-                text=f"Session {session_id} cleaned up successfully: {result['message']}",
-            )
-        ]
+            return [
+                types.TextContent(
+                    type="text",
+                    text=f"Session {session_id} cleaned up successfully: {result['message']}",
+                )
+            ]
 
-    else:
-        raise ValueError(f"Unknown tool: {name}")
+        else:
+            raise ValueError(f"Unknown tool: {name}")
+    except Exception as e:
+        logger.error(f"Error executing tool {name}: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        
+        # Return a properly formatted error response
+        error_message = f"Error executing {name}: {str(e)}"
+        return [types.TextContent(type="text", text=error_message)]
 
 
 def _format_execution_result(result: Dict[str, Any], session_id: Optional[str] = None) -> str:
@@ -195,26 +205,47 @@ def _format_execution_result(result: Dict[str, Any], session_id: Optional[str] =
 
 async def main() -> None:
     """Start the MCP server."""
-    if "--debug" in sys.argv:
+    # Configure logging based on debug flag from command line or environment
+    debug_mode = "--debug" in sys.argv or os.environ.get("LEAN_DOCKER_MCP_DEBUG", "").lower() in ["true", "1", "yes"]
+    
+    if debug_mode:
         logging.basicConfig(level=logging.DEBUG)
         logger.setLevel(logging.DEBUG)
         logger.debug("Debug mode enabled")
-
+    else:
+        # Set info level logging by default for better diagnostics
+        logging.basicConfig(level=logging.INFO)
+    
+    # Disable pooling for now until we can verify basic functionality
+    try:
+        logger.info("Temporarily disabling container pooling for stability")
+        if hasattr(config.docker, 'pool_enabled'):
+            config.docker.pool_enabled = False
+    except Exception as e:
+        logger.error(f"Error configuring container pooling: {e}")
+    
     # Run the server using stdin/stdout streams
+    logger.info("Starting MCP server using stdio transport")
     try:
         async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
+            logger.info("stdio server initialized, running MCP server")
             await server.run(
                 read_stream,
                 write_stream,
                 InitializationOptions(
                     server_name="lean-docker-mcp",
-                    server_version="0.1.0",
+                    server_version="0.2.0",
                     capabilities=server.get_capabilities(
                         notification_options=NotificationOptions(),
                         experimental_capabilities={},
                     ),
                 ),
             )
+    except Exception as e:
+        logger.error(f"Error running MCP server: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        raise
     finally:
         # Clean up any remaining sessions when the server shuts down
         logger.info("Cleaning up sessions")
@@ -223,6 +254,9 @@ async def main() -> None:
                 await docker_manager.cleanup_session(session_id)
             except Exception as e:
                 logger.error(f"Error cleaning up session {session_id}: {e}")
+        
+        # Don't attempt pool cleanup for now
+        logger.info("Server shutdown complete")
 
 
 # If this module is run directly, start the server

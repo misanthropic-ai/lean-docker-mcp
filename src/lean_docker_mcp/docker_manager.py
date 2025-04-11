@@ -6,7 +6,9 @@ import logging
 import os
 import re
 import tempfile
-from typing import Any, Dict, List, Optional, Tuple
+import uuid
+import time
+from typing import Any, Dict, List, Optional, Tuple, Set
 
 import docker
 from docker.errors import NotFound
@@ -174,9 +176,183 @@ class DockerManager:
     def __init__(self, config: Optional[Configuration] = None):
         """Initialize the Docker manager with the given configuration."""
         self.config = config or load_config()
-        self.client = docker.from_env()
+        self.docker_available = False
+        
+        # Handle the case where Docker is not available gracefully
+        try:
+            self.client = docker.from_env()
+            self.docker_available = True
+            logger.info("Docker connection established successfully")
+        except Exception as e:
+            logger.error(f"Docker is not available: {e}")
+            logger.warning("Running with Docker unavailable - tool calls will return errors")
+            self.client = None
+            
         self.persistent_containers: Dict[str, str] = {}  # session_id -> container_id
         self.validator = LeanCodeValidator(self.config)
+        
+        # Container pooling functionality
+        self.container_pool: List[str] = []  # List of available container IDs
+        self.in_use_containers: Set[str] = set()  # Set of container IDs currently in use
+        self.pool_lock = asyncio.Lock()  # Lock for thread safety when accessing the pool
+        
+        # Pool configuration - add reasonable defaults if not in config
+        # Check if these attributes exist in the config.docker object to avoid AttributeError
+        try:
+            self.pool_size = getattr(self.config.docker, 'pool_size', 32)
+            self.pool_max_age = getattr(self.config.docker, 'pool_max_age', 300)  # 5 minutes
+            self.max_concurrent_creations = getattr(self.config.docker, 'max_concurrent_creations', 5)
+            self.pool_enabled = getattr(self.config.docker, 'pool_enabled', True)
+        except AttributeError:
+            # If we hit any AttributeError, disable pooling
+            logger.warning("Error accessing pooling configuration attributes, disabling container pooling")
+            self.pool_size = 0
+            self.pool_max_age = 300
+            self.max_concurrent_creations = 5
+            self.pool_enabled = False
+        
+        self.container_creation_timestamps: Dict[str, float] = {}  # container_id -> creation_timestamp
+        
+        # Container acquisition semaphore to limit concurrent container creations
+        self.container_semaphore = asyncio.Semaphore(self.max_concurrent_creations)
+
+    def _prepare_lean_code(self, code: str) -> str:
+        """Prepare Lean code for execution by checking if it needs a main function wrapper."""
+        # Check if code already has a main function definition
+        if "def main" in code:
+            return code
+            
+        # If there are #eval statements but no main function, add a simple main function
+        if "#eval" in code:
+            # Add a simple main function at the end
+            return code + "\n\ndef main : IO Unit := IO.println \"Code executed successfully\"\n"
+            
+        return code
+
+    async def initialize_pool(self) -> None:
+        """Initialize the container pool."""
+        logger.info(f"Initializing container pool with size {self.pool_size}")
+        
+        async with self.pool_lock:
+            tasks = []
+            for _ in range(self.pool_size):
+                tasks.append(self._create_pooled_container())
+            
+            if tasks:
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                # Filter out exceptions and add only successful container creations to the pool
+                for result in results:
+                    if not isinstance(result, Exception) and result:
+                        self.container_pool.append(result)
+                        self.container_creation_timestamps[result] = time.time()
+            
+            logger.info(f"Container pool initialized with {len(self.container_pool)} containers")
+
+    async def _create_pooled_container(self) -> str:
+        """Create a new container for the pool."""
+        try:
+            async with self.container_semaphore:
+                # Create a container in a paused state that we can use later
+                container = self.client.containers.run(
+                    image=self.config.docker.image,
+                    command=["sleep", "3600"],  # Sleep for 1 hour
+                    detach=True,
+                    mem_limit=self.config.docker.memory_limit,
+                    cpu_quota=int(self.config.docker.cpu_limit * 100000),
+                    network_disabled=self.config.docker.network_disabled,
+                    read_only=True,  # Make container read-only for security
+                    labels={
+                        "lean_docker_mcp.pooled": "true",
+                        "lean_docker_mcp.created": str(time.time())
+                    }
+                )
+                logger.info(f"Created pooled container {container.id[:12]}")
+                return container.id
+        except Exception as e:
+            logger.error(f"Error creating pooled container: {str(e)}")
+            raise DockerExecutionError(f"Failed to create container for pool: {str(e)}")
+
+    async def _get_container_from_pool(self) -> str:
+        """Get a container from the pool or create a new one if needed."""
+        container_id = None
+        
+        async with self.pool_lock:
+            # Clean up old containers in the pool
+            current_time = time.time()
+            removed_count = 0
+            
+            for container_id in list(self.container_pool):
+                if container_id in self.container_creation_timestamps:
+                    age = current_time - self.container_creation_timestamps[container_id]
+                    if age > self.pool_max_age:
+                        self.container_pool.remove(container_id)
+                        try:
+                            container = self.client.containers.get(container_id)
+                            container.remove(force=True)
+                            del self.container_creation_timestamps[container_id]
+                            removed_count += 1
+                        except Exception as e:
+                            logger.warning(f"Error removing old container {container_id[:12]}: {str(e)}")
+            
+            if removed_count > 0:
+                logger.info(f"Removed {removed_count} aged-out containers from pool")
+                
+            # Get a container from the pool
+            if self.container_pool:
+                container_id = self.container_pool.pop()
+                self.in_use_containers.add(container_id)
+                
+        # If no container available in pool, create a new one
+        if not container_id:
+            logger.info("No containers available in pool, creating new one")
+            container_id = await self._create_pooled_container()
+            async with self.pool_lock:
+                self.in_use_containers.add(container_id)
+                self.container_creation_timestamps[container_id] = time.time()
+                
+        return container_id
+
+    async def _return_container_to_pool(self, container_id: str) -> None:
+        """Return a container to the pool for reuse or clean it up if the pool is full."""
+        async with self.pool_lock:
+            # Remove from in-use set
+            if container_id in self.in_use_containers:
+                self.in_use_containers.remove(container_id)
+            
+            try:
+                # Check container still exists and is healthy
+                container = self.client.containers.get(container_id)
+                
+                # Reset container state if needed (stop running processes, clean temporary files)
+                # This is important to ensure isolation between executions
+                try:
+                    container.exec_run("pkill -9 -u leanuser", user="root")
+                    container.exec_run("rm -rf /home/leanuser/project/*", user="root")
+                except Exception as e:
+                    logger.warning(f"Error resetting container state: {str(e)}")
+                
+                # If pool isn't full, add it back to the pool
+                if len(self.container_pool) < self.pool_size:
+                    self.container_pool.append(container_id)
+                    # Reset the creation timestamp to extend lifetime
+                    self.container_creation_timestamps[container_id] = time.time()
+                    logger.debug(f"Returned container {container_id[:12]} to pool")
+                else:
+                    # Pool is full, remove this container
+                    container.remove(force=True)
+                    if container_id in self.container_creation_timestamps:
+                        del self.container_creation_timestamps[container_id]
+                    logger.debug(f"Pool is full, removed container {container_id[:12]}")
+            except Exception as e:
+                logger.warning(f"Error returning container {container_id[:12]} to pool: {str(e)}")
+                # Try to force remove if there's an issue
+                try:
+                    self.client.containers.get(container_id).remove(force=True)
+                except:
+                    pass
+                
+                if container_id in self.container_creation_timestamps:
+                    del self.container_creation_timestamps[container_id]
 
     async def execute_transient(self, code: str) -> Dict[str, Any]:
         """Execute Lean4 code in a new container that doesn't persist state.
@@ -198,12 +374,43 @@ class DockerManager:
                     "status": "error",
                 }
                 
+            # If Docker is not available, return a clear error
+            if not self.docker_available:
+                return {
+                    "stdout": "",
+                    "error": "Docker is not available. Please make sure Docker is running and restart the server.",
+                    "error_type": "docker_unavailable",
+                    "status": "error",
+                }
+
+            # For now, always use the original implementation
+            # until pooling issues are resolved
+            return await self._execute_transient_original(code)
+                
+        except Exception as e:
+            if not isinstance(e, DockerExecutionError):
+                raise DockerExecutionError(f"Error executing code in Docker: {str(e)}")
+            raise
+
+    async def _execute_transient_pooled(self, code: str) -> Dict[str, Any]:
+        """Execute Lean4 code using a container from the pool.
+        
+        Args:
+            code: The Lean4 code to execute
+            
+        Returns:
+            A dictionary containing the execution results
+        """
+        container_id = None
+        try:
+            # Get a container from the pool
+            container_id = await self._get_container_from_pool()
+            container = self.client.containers.get(container_id)
+            
             # Create temporary directory to mount inside the container
             with tempfile.TemporaryDirectory() as temp_dir:
                 # Create Lean file with the code
                 script_path = os.path.join(temp_dir, "Script.lean")
-                
-                # Create a wrapper script to capture output and errors
                 lean_runner_path = os.path.join(temp_dir, "run_lean.sh")
                 
                 # Write the Lean code to a file
@@ -212,10 +419,25 @@ class DockerManager:
                 
                 # Create a wrapper script to run Lean and capture different streams
                 with open(lean_runner_path, "w") as f:
-                    f.write(f"""#!/bin/bash
+                    script_content = """#!/bin/bash
 # Wrapper script to execute Lean and capture output streams
+echo "Running Lean in $(pwd)"
+echo "Lean version: $(lean --version)"
+echo "Content of Script.lean:"
+cat /app/Script.lean
+echo "---"
+
+# Run Lean with -r (run) flag which expects a main function
 lean_output=$(lean -r /app/Script.lean 2>&1)
 exit_code=$?
+
+# If it failed and doesn't contain a main function, try with --eval
+if [ $exit_code -ne 0 ] && ! grep -q "def main" /app/Script.lean; then
+    echo "No main function found, trying with --eval"
+    # Extract any #eval expressions and run them manually
+    lean_output=$(grep -oP '#eval\\s+(.+)' /app/Script.lean | sed 's/#eval\\s*//' | xargs -I{} lean --eval {} 2>&1)
+    exit_code=$?
+fi
 
 # Write structured result with clear markers for parsing
 echo "---LEAN_OUTPUT_START---"
@@ -225,30 +447,66 @@ echo "---LEAN_EXIT_CODE_START---"
 echo "$exit_code"
 echo "---LEAN_EXIT_CODE_END---"
 exit $exit_code
-""")
+"""
+                    f.write(script_content)
                 
                 # Make the wrapper script executable
                 os.chmod(lean_runner_path, 0o755)
-
-                # Run container synchronously with the script
-                container_output = self.client.containers.run(
-                    image=self.config.docker.image,
-                    command=["timeout", str(self.config.docker.timeout), "/app/run_lean.sh"],
-                    volumes={temp_dir: {"bind": "/app", "mode": "rw"}},
-                    working_dir="/app",  # Execute in the mounted volume
-                    mem_limit=self.config.docker.memory_limit,
-                    cpu_quota=int(self.config.docker.cpu_limit * 100000),
-                    network_disabled=self.config.docker.network_disabled,
-                    remove=True,
-                    detach=False,  # Run synchronously
+                
+                # Copy files to container
+                exec_id = str(uuid.uuid4())
+                target_dir = f"/tmp/app_{exec_id}"
+                
+                # Create target directory in container
+                mkdir_cmd = container.exec_run(
+                    cmd=["mkdir", "-p", target_dir],
                 )
-
+                
+                if mkdir_cmd.exit_code != 0:
+                    raise DockerExecutionError(f"Failed to create directory in container: {mkdir_cmd.output.decode('utf-8')}")
+                
+                # Use docker cp to copy files to container
+                import subprocess
+                cp_script = subprocess.run(
+                    ["docker", "cp", script_path, f"{container.id}:{target_dir}/Script.lean"],
+                    capture_output=True
+                )
+                
+                if cp_script.returncode != 0:
+                    raise DockerExecutionError(f"Failed to copy script to container: {cp_script.stderr.decode('utf-8')}")
+                
+                cp_runner = subprocess.run(
+                    ["docker", "cp", lean_runner_path, f"{container.id}:{target_dir}/run_lean.sh"],
+                    capture_output=True
+                )
+                
+                if cp_runner.returncode != 0:
+                    raise DockerExecutionError(f"Failed to copy runner to container: {cp_runner.stderr.decode('utf-8')}")
+                
+                # Make the runner executable in the container
+                chmod_cmd = container.exec_run(
+                    cmd=["chmod", "+x", f"{target_dir}/run_lean.sh"],
+                )
+                
+                # Run the Lean code
+                exec_result = container.exec_run(
+                    cmd=[f"{target_dir}/run_lean.sh"],
+                    workdir=target_dir,
+                    user="leanuser",
+                )
+                
+                # Clean up the temporary files
+                container.exec_run(
+                    cmd=["rm", "-rf", target_dir],
+                )
+                
                 # Decode the output
-                output = container_output.decode("utf-8")
+                output = exec_result.output.decode("utf-8")
+                exit_code = exec_result.exit_code
                 
                 # Parse the structured output
                 lean_output = ""
-                exit_code = -1
+                parsed_exit_code = exit_code
                 
                 # Extract the Lean output
                 output_start = output.find("---LEAN_OUTPUT_START---")
@@ -262,16 +520,16 @@ exit $exit_code
                 if exit_code_start >= 0 and exit_code_end >= 0:
                     exit_code_str = output[exit_code_start + len("---LEAN_EXIT_CODE_START---"):exit_code_end].strip()
                     try:
-                        exit_code = int(exit_code_str)
+                        parsed_exit_code = int(exit_code_str)
                     except ValueError:
-                        exit_code = -1
-
+                        parsed_exit_code = exit_code
+                
                 # Check for Lean-specific errors and parse them if present
-                is_success = exit_code == 0 and "error:" not in lean_output.lower()
+                is_success = parsed_exit_code == 0 and "error:" not in lean_output.lower()
                 
                 result = {
                     "stdout": lean_output,
-                    "exit_code": exit_code,
+                    "exit_code": parsed_exit_code,
                     "status": "success" if is_success else "error",
                 }
                 
@@ -282,14 +540,128 @@ exit $exit_code
                         result["error"] = lean_error.message
                         result["error_info"] = lean_error.to_dict()
                     else:
-                        result["error"] = "Lean execution error" if exit_code != 0 else "Unknown error in Lean output"
+                        result["error"] = "Lean execution error" if parsed_exit_code != 0 else "Unknown error in Lean output"
                 
                 return result
-
+                
         except Exception as e:
-            if not isinstance(e, DockerExecutionError):
-                raise DockerExecutionError(f"Error executing code in Docker: {str(e)}")
-            raise
+            logger.error(f"Error in pooled execution: {str(e)}")
+            raise DockerExecutionError(f"Error executing Lean code in pooled container: {str(e)}")
+        
+        finally:
+            # Return the container to the pool if we got one
+            if container_id:
+                await self._return_container_to_pool(container_id)
+
+    async def _execute_transient_original(self, code: str) -> Dict[str, Any]:
+        """Original implementation of transient execution without pooling."""
+        # Check if the code contains only #eval expressions without a main function
+        # If so, wrap it in a main function to avoid the "unknown declaration 'main'" error
+        modified_code = self._prepare_lean_code(code)
+        
+        # Create temporary directory to mount inside the container
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Create Lean file with the code
+            script_path = os.path.join(temp_dir, "Script.lean")
+            
+            # Create a wrapper script to capture output and errors
+            lean_runner_path = os.path.join(temp_dir, "run_lean.sh")
+            
+            # Write the Lean code to a file
+            with open(script_path, "w") as f:
+                f.write(modified_code)
+            
+            # Create a wrapper script to run Lean and capture different streams
+            with open(lean_runner_path, "w") as f:
+                script_content = """#!/bin/bash
+# Wrapper script to execute Lean and capture output streams
+echo "Running Lean in $(pwd)"
+echo "Lean version: $(lean --version)"
+echo "Content of Script.lean:"
+cat /app/Script.lean
+echo "---"
+
+# Run Lean with -r (run) flag which expects a main function
+lean_output=$(lean -r /app/Script.lean 2>&1)
+exit_code=$?
+
+# If it failed and doesn't contain a main function, try with --eval
+if [ $exit_code -ne 0 ] && ! grep -q "def main" /app/Script.lean; then
+    echo "No main function found, trying with --eval"
+    # Extract any #eval expressions and run them manually
+    lean_output=$(grep -oP '#eval\\s+(.+)' /app/Script.lean | sed 's/#eval\\s*//' | xargs -I{} lean --eval {} 2>&1)
+    exit_code=$?
+fi
+
+# Write structured result with clear markers for parsing
+echo "---LEAN_OUTPUT_START---"
+echo "$lean_output"
+echo "---LEAN_OUTPUT_END---"
+echo "---LEAN_EXIT_CODE_START---"
+echo "$exit_code"
+echo "---LEAN_EXIT_CODE_END---"
+exit $exit_code
+"""
+                f.write(script_content)
+            
+            # Make the wrapper script executable
+            os.chmod(lean_runner_path, 0o755)
+
+            # Run container synchronously with the script
+            container_output = self.client.containers.run(
+                image=self.config.docker.image,
+                command=["timeout", str(self.config.docker.timeout), "/app/run_lean.sh"],
+                volumes={temp_dir: {"bind": "/app", "mode": "rw"}},
+                working_dir="/app",  # Execute in the mounted volume
+                mem_limit=self.config.docker.memory_limit,
+                cpu_quota=int(self.config.docker.cpu_limit * 100000),
+                network_disabled=self.config.docker.network_disabled,
+                remove=True,
+                detach=False,  # Run synchronously
+            )
+
+            # Decode the output
+            output = container_output.decode("utf-8")
+            
+            # Parse the structured output
+            lean_output = ""
+            exit_code = -1
+            
+            # Extract the Lean output
+            output_start = output.find("---LEAN_OUTPUT_START---")
+            output_end = output.find("---LEAN_OUTPUT_END---")
+            if output_start >= 0 and output_end >= 0:
+                lean_output = output[output_start + len("---LEAN_OUTPUT_START---"):output_end].strip()
+            
+            # Extract the exit code
+            exit_code_start = output.find("---LEAN_EXIT_CODE_START---")
+            exit_code_end = output.find("---LEAN_EXIT_CODE_END---")
+            if exit_code_start >= 0 and exit_code_end >= 0:
+                exit_code_str = output[exit_code_start + len("---LEAN_EXIT_CODE_START---"):exit_code_end].strip()
+                try:
+                    exit_code = int(exit_code_str)
+                except ValueError:
+                    exit_code = -1
+
+            # Check for Lean-specific errors and parse them if present
+            is_success = exit_code == 0 and "error:" not in lean_output.lower()
+            
+            result = {
+                "stdout": lean_output,
+                "exit_code": exit_code,
+                "status": "success" if is_success else "error",
+            }
+            
+            # If there was an error, add more detailed error information
+            if not is_success:
+                lean_error = self.validator.parse_lean_error(lean_output)
+                if lean_error:
+                    result["error"] = lean_error.message
+                    result["error_info"] = lean_error.to_dict()
+                else:
+                    result["error"] = "Lean execution error" if exit_code != 0 else "Unknown error in Lean output"
+            
+            return result
 
     async def execute_persistent(self, session_id: str, code: str) -> Dict[str, Any]:
         """Execute Lean4 code in a persistent container that retains state between calls.
@@ -311,6 +683,19 @@ exit $exit_code
                 "status": "error",
             }
             
+        # If Docker is not available, return a clear error
+        if not self.docker_available:
+            return {
+                "stdout": "",
+                "error": "Docker is not available. Please make sure Docker is running and restart the server.",
+                "error_type": "docker_unavailable",
+                "status": "error",
+                "session_id": session_id,
+            }
+            
+        # Process the code to automatically add a main function for #eval expressions if needed
+        modified_code = self._prepare_lean_code(code)
+        
         container_id = self.persistent_containers.get(session_id)
 
         # Create a new container if it doesn't exist
@@ -366,7 +751,7 @@ exit $exit_code
             wrapper_filename = f"run_lean_{exec_id}.sh"
 
             # Escape single quotes for shell command
-            safe_code = code.replace("'", "'\"'\"'")
+            safe_code = modified_code.replace("'", "'\"'\"'")
             
             # Create the Lean file
             cmd = f"echo '{safe_code}' > /home/leanuser/project/{script_filename}"
@@ -381,8 +766,23 @@ exit $exit_code
             # Create a wrapper script to capture output
             wrapper_script = f"""#!/bin/bash
 # Wrapper script to execute Lean and capture output streams
+echo "Running Lean in $(pwd)"
+echo "Lean version: $(lean --version)"
+echo "Content of Script:{script_filename}:"
+cat /home/leanuser/project/{script_filename}
+echo "---"
+
+# Run Lean with -r (run) flag which expects a main function
 lean_output=$(lean -r /home/leanuser/project/{script_filename} 2>&1)
 exit_code=$?
+
+# If it failed and doesn't contain a main function, try with --eval
+if [ $exit_code -ne 0 ] && ! grep -q "def main" /home/leanuser/project/{script_filename}; then
+    echo "No main function found, trying with --eval"
+    # Extract any #eval expressions and run them manually
+    lean_output=$(grep -oP '#eval\\s+(.+)' /home/leanuser/project/{script_filename} | sed 's/#eval\\s*//' | xargs -I{{}} lean --eval {{}} 2>&1)
+    exit_code=$?
+fi
 
 # Write structured result with clear markers for parsing
 echo "---LEAN_OUTPUT_START---"
@@ -485,6 +885,10 @@ exit $exit_code
         Returns:
             A dictionary indicating success or failure
         """
+        # If Docker is not available, return a clear error
+        if not self.docker_available:
+            return {"status": "error", "message": "Docker is not available. Please make sure Docker is running and restart the server."}
+            
         container_id = self.persistent_containers.get(session_id)
         if not container_id:
             return {"status": "not_found", "message": f"No session found with ID {session_id}"}
