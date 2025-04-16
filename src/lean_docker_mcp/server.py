@@ -216,13 +216,15 @@ async def main() -> None:
         # Set info level logging by default for better diagnostics
         logging.basicConfig(level=logging.INFO)
     
-    # Disable pooling for now until we can verify basic functionality
-    try:
-        logger.info("Temporarily disabling container pooling for stability")
-        if hasattr(config.docker, 'pool_enabled'):
-            config.docker.pool_enabled = False
-    except Exception as e:
-        logger.error(f"Error configuring container pooling: {e}")
+    # Initialize the container pool if enabled
+    if config.docker.pool_enabled:
+        logger.info("Initializing container pool")
+        try:
+            await docker_manager.initialize_pool()
+        except Exception as e:
+            logger.error(f"Error initializing container pool: {e}")
+            # Don't disable pooling, just log the error and continue
+            # The system will fall back to creating containers on demand
     
     # Run the server using stdin/stdout streams
     logger.info("Starting MCP server using stdio transport")

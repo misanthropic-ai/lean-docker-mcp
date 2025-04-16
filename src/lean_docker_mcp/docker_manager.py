@@ -231,22 +231,39 @@ class DockerManager:
 
     async def initialize_pool(self) -> None:
         """Initialize the container pool."""
+        if not self.pool_enabled:
+            logger.info("Container pooling is disabled, skipping initialization")
+            return
+            
         logger.info(f"Initializing container pool with size {self.pool_size}")
         
         async with self.pool_lock:
+            # Clear any existing pool state
+            self.container_pool.clear()
+            self.in_use_containers.clear()
+            self.container_creation_timestamps.clear()
+            
+            # Create initial pool containers
             tasks = []
             for _ in range(self.pool_size):
                 tasks.append(self._create_pooled_container())
             
             if tasks:
                 results = await asyncio.gather(*tasks, return_exceptions=True)
-                # Filter out exceptions and add only successful container creations to the pool
+                successful_creations = 0
+                
                 for result in results:
-                    if not isinstance(result, Exception) and result:
+                    if isinstance(result, Exception):
+                        logger.error(f"Error creating pooled container: {str(result)}")
+                    elif result:
                         self.container_pool.append(result)
                         self.container_creation_timestamps[result] = time.time()
-            
-            logger.info(f"Container pool initialized with {len(self.container_pool)} containers")
+                        successful_creations += 1
+                
+                logger.info(f"Container pool initialized with {successful_creations} containers")
+                
+                if successful_creations < self.pool_size:
+                    logger.warning(f"Only created {successful_creations} out of {self.pool_size} requested containers")
 
     async def _create_pooled_container(self) -> str:
         """Create a new container for the pool."""
@@ -266,7 +283,7 @@ class DockerManager:
                         "lean_docker_mcp.created": str(time.time())
                     }
                 )
-                logger.info(f"Created pooled container {container.id[:12]}")
+                logger.debug(f"Created pooled container {container.id[:12]}")
                 return container.id
         except Exception as e:
             logger.error(f"Error creating pooled container: {str(e)}")
@@ -301,6 +318,7 @@ class DockerManager:
             if self.container_pool:
                 container_id = self.container_pool.pop()
                 self.in_use_containers.add(container_id)
+                logger.debug(f"Retrieved container {container_id[:12]} from pool")
                 
         # If no container available in pool, create a new one
         if not container_id:
@@ -355,14 +373,7 @@ class DockerManager:
                     del self.container_creation_timestamps[container_id]
 
     async def execute_transient(self, code: str) -> Dict[str, Any]:
-        """Execute Lean4 code in a new container that doesn't persist state.
-
-        Args:
-            code: The Lean4 code to execute
-
-        Returns:
-            A dictionary containing the execution results with stdout, error information and status
-        """
+        """Execute Lean4 code in a new container that doesn't persist state."""
         try:
             # Validate the code first
             is_valid, error_message = self.validator.validate(code)
@@ -383,9 +394,11 @@ class DockerManager:
                     "status": "error",
                 }
 
-            # For now, always use the original implementation
-            # until pooling issues are resolved
-            return await self._execute_transient_original(code)
+            # Use pooled execution if enabled
+            if self.pool_enabled:
+                return await self._execute_transient_pooled(code)
+            else:
+                return await self._execute_transient_original(code)
                 
         except Exception as e:
             if not isinstance(e, DockerExecutionError):
