@@ -189,8 +189,20 @@ class DockerManager:
             except NotFound:
                 logger.info(f"Docker image {self.config.docker.image} not found locally; building from Dockerfile")
                 dockerfile_dir = os.path.dirname(__file__)
-                self.client.images.build(path=dockerfile_dir, dockerfile="Dockerfile", tag=self.config.docker.image)
-                logger.info(f"Successfully built Docker image {self.config.docker.image}")
+                try:
+                    # Check if Dockerfile exists
+                    dockerfile_path = os.path.join(dockerfile_dir, "Dockerfile")
+                    if not os.path.exists(dockerfile_path):
+                        logger.warning(f"Dockerfile not found at {dockerfile_path}")
+                        raise FileNotFoundError(f"Dockerfile not found at {dockerfile_path}")
+                        
+                    # Build the Docker image
+                    logger.info(f"Building Docker image using Dockerfile at {dockerfile_path}")
+                    self.client.images.build(path=dockerfile_dir, dockerfile="Dockerfile", tag=self.config.docker.image)
+                    logger.info(f"Successfully built Docker image {self.config.docker.image}")
+                except Exception as e:
+                    logger.error(f"Failed to build Docker image: {e}")
+                    logger.warning(f"Please build the Docker image manually using: docker build -t {self.config.docker.image} -f src/lean_docker_mcp/Dockerfile .")
         except Exception as e:
             logger.error(f"Docker is not available: {e}")
             logger.warning("Running with Docker unavailable - tool calls will return errors")

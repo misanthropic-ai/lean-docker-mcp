@@ -1,6 +1,6 @@
 [project]
 name = "lean-docker-mcp"
-version = "0.2.2"
+version = "0.2.3"
 description = "Dockerised Lean4 execution environment for AI agents"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -48,6 +48,8 @@ lean-docker-mcp = "lean_docker_mcp:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/lean_docker_mcp"]
+include-package-data = true
+package-data = {"lean_docker_mcp" = ["Dockerfile"]}
 
 [tool.hatch.build.targets.sdist]
 include = [
