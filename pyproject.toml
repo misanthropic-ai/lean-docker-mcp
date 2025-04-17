@@ -58,6 +58,7 @@ include = [
     "src/lean_docker_mcp/Dockerfile",
     "README.md",
     "LICENSE",
+    "Dockerfile"
 ]
 
 [tool.pytest.ini_options]
