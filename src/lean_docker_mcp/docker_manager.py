@@ -235,11 +235,14 @@ class DockerManager:
         if "def main" in code:
             return code
             
-        # If there are #eval statements but no main function, add a simple main function
-        if "#eval" in code:
-            # Add a simple main function at the end
-            return code + "\n\ndef main : IO Unit := IO.println \"Code executed successfully\"\n"
-            
+        # Remove automatic main function injection for #eval expressions so that
+        # the original compile‑time evaluation output from `#eval` statements is
+        # preserved and can be captured directly from Lean's normal compiler
+        # output.  The wrapper scripts used by the execution routines will
+        # compile the file with `lean` (without the `-r` flag) whenever no
+        # `def main` is present, which naturally prints the results of any
+        # `#eval` statements.  Therefore we simply return the code unchanged in
+        # this case.
         return code
 
     async def initialize_pool(self) -> None:
@@ -447,21 +450,21 @@ class DockerManager:
                 with open(lean_runner_path, "w") as f:
                     script_content = """#!/bin/bash
 # Wrapper script to execute Lean and capture output streams
+
 echo "Running Lean in $(pwd)"
 echo "Lean version: $(lean --version)"
 echo "Content of Script.lean:"
-cat /app/Script.lean
+cat Script.lean
 echo "---"
 
-# Run Lean with -r (run) flag which expects a main function
-lean_output=$(lean -r /app/Script.lean 2>&1)
-exit_code=$?
-
-# If it failed and doesn't contain a main function, try with --eval
-if [ $exit_code -ne 0 ] && ! grep -q "def main" /app/Script.lean; then
-    echo "No main function found, trying with --eval"
-    # Extract any #eval expressions and run them manually
-    lean_output=$(grep -oP '#eval\\s+(.+)' /app/Script.lean | sed 's/#eval\\s*//' | xargs -I{} lean --eval {} 2>&1)
+# Decide whether the file defines a main function
+if grep -q 'def[[:space:]]\+main' Script.lean; then
+    # Run Lean with -r to execute the main function
+    lean_output=$(lean -r Script.lean 2>&1 | grep -v "warning: failed to query latest release")
+    exit_code=$?
+else
+    # Compile only – this will trigger evaluation of any `#eval` directives
+    lean_output=$(lean Script.lean 2>&1 | grep -v "warning: failed to query latest release")
     exit_code=$?
 fi
 
@@ -601,21 +604,21 @@ exit $exit_code
             with open(lean_runner_path, "w") as f:
                 script_content = """#!/bin/bash
 # Wrapper script to execute Lean and capture output streams
+
 echo "Running Lean in $(pwd)"
 echo "Lean version: $(lean --version)"
 echo "Content of Script.lean:"
-cat /app/Script.lean
+cat Script.lean
 echo "---"
 
-# Run Lean with -r (run) flag which expects a main function
-lean_output=$(lean -r /app/Script.lean 2>&1)
-exit_code=$?
-
-# If it failed and doesn't contain a main function, try with --eval
-if [ $exit_code -ne 0 ] && ! grep -q "def main" /app/Script.lean; then
-    echo "No main function found, trying with --eval"
-    # Extract any #eval expressions and run them manually
-    lean_output=$(grep -oP '#eval\\s+(.+)' /app/Script.lean | sed 's/#eval\\s*//' | xargs -I{} lean --eval {} 2>&1)
+# Decide whether the file defines a main function
+if grep -q 'def[[:space:]]\+main' Script.lean; then
+    # Run Lean with -r to execute the main function
+    lean_output=$(lean -r Script.lean 2>&1 | grep -v "warning: failed to query latest release")
+    exit_code=$?
+else
+    # Compile only – this will trigger evaluation of any `#eval` directives
+    lean_output=$(lean Script.lean 2>&1 | grep -v "warning: failed to query latest release")
     exit_code=$?
 fi
 
@@ -719,9 +722,6 @@ exit $exit_code
                 "session_id": session_id,
             }
             
-        # Process the code to automatically add a main function for #eval expressions if needed
-        modified_code = self._prepare_lean_code(code)
-        
         container_id = self.persistent_containers.get(session_id)
 
         # Create a new container if it doesn't exist
@@ -777,7 +777,7 @@ exit $exit_code
             wrapper_filename = f"run_lean_{exec_id}.sh"
 
             # Escape single quotes for shell command
-            safe_code = modified_code.replace("'", "'\"'\"'")
+            safe_code = code.replace("'", "'\"'\"'")
             
             # Create the Lean file
             cmd = f"echo '{safe_code}' > /home/leanuser/project/{script_filename}"
@@ -792,21 +792,21 @@ exit $exit_code
             # Create a wrapper script to capture output
             wrapper_script = f"""#!/bin/bash
 # Wrapper script to execute Lean and capture output streams
+
 echo "Running Lean in $(pwd)"
 echo "Lean version: $(lean --version)"
 echo "Content of Script:{script_filename}:"
 cat /home/leanuser/project/{script_filename}
 echo "---"
 
-# Run Lean with -r (run) flag which expects a main function
-lean_output=$(lean -r /home/leanuser/project/{script_filename} 2>&1)
-exit_code=$?
-
-# If it failed and doesn't contain a main function, try with --eval
-if [ $exit_code -ne 0 ] && ! grep -q "def main" /home/leanuser/project/{script_filename}; then
-    echo "No main function found, trying with --eval"
-    # Extract any #eval expressions and run them manually
-    lean_output=$(grep -oP '#eval\\s+(.+)' /home/leanuser/project/{script_filename} | sed 's/#eval\\s*//' | xargs -I{{}} lean --eval {{}} 2>&1)
+# Decide whether the file defines a main function
+if grep -q 'def[[:space:]]\+main' /home/leanuser/project/{script_filename}; then
+    # Run Lean with -r to execute the main function
+    lean_output=$(lean -r /home/leanuser/project/{script_filename} 2>&1 | grep -v "warning: failed to query latest release")
+    exit_code=$?
+else
+    # Compile only – this will trigger evaluation of any `#eval` directives
+    lean_output=$(lean /home/leanuser/project/{script_filename} 2>&1 | grep -v "warning: failed to query latest release")
     exit_code=$?
 fi
 
