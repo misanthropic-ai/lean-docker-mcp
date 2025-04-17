@@ -183,6 +183,14 @@ class DockerManager:
             self.client = docker.from_env()
             self.docker_available = True
             logger.info("Docker connection established successfully")
+            # Ensure Docker image exists locally; build from local Dockerfile if missing
+            try:
+                self.client.images.get(self.config.docker.image)
+            except NotFound:
+                logger.info(f"Docker image {self.config.docker.image} not found locally; building from Dockerfile")
+                dockerfile_dir = os.path.dirname(__file__)
+                self.client.images.build(path=dockerfile_dir, dockerfile="Dockerfile", tag=self.config.docker.image)
+                logger.info(f"Successfully built Docker image {self.config.docker.image}")
         except Exception as e:
             logger.error(f"Docker is not available: {e}")
             logger.warning("Running with Docker unavailable - tool calls will return errors")
