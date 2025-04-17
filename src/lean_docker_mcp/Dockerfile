@@ -13,7 +13,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-pip \
     curl \
-    wget \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -39,15 +38,8 @@ RUN lean --version
 RUN mkdir -p /home/leanuser/project
 WORKDIR /home/leanuser/project
 
-# Pre-install Mathlib for better performance
-# Initialize a project with Mathlib
-RUN echo '[package]\nname = "lean-docker-mcp"\nversion = "0.2.5"\nlean_version = "leanprover/lean4:stable"\n\n[dependencies]\nmathlib = {git = "https://github.com/leanprover-community/mathlib4.git"}' > lakefile.lean
-RUN echo 'import Mathlib\n\ndef main : IO Unit := IO.println "Hello, Lean4 with Mathlib!"' > Main.lean
-RUN lake update
-RUN lake build
-
-# Cleanup after building to reduce image size
-RUN rm -rf /home/leanuser/.cache/lake/build
+# Create a simple Lean file
+RUN echo 'def main : IO Unit := IO.println "Hello, Lean4!"' > Main.lean
 
 # Default command (will be overridden when running the container)
-CMD ["lean", "-r", "Main.lean"]
+CMD ["lean", "-r", "Main.lean"] 

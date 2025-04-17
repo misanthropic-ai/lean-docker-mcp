@@ -297,7 +297,7 @@ class DockerManager:
                     mem_limit=self.config.docker.memory_limit,
                     cpu_quota=int(self.config.docker.cpu_limit * 100000),
                     network_disabled=self.config.docker.network_disabled,
-                    read_only=True,  # Make container read-only for security
+                    read_only=False,  # Make container read-only for security
                     pull=False,  # Never pull the image, use local only
                     labels={
                         "lean_docker_mcp.pooled": "true",
