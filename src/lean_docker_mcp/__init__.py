@@ -19,7 +19,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("lean-docker-mcp")
 
 # Package version
-__version__ = "0.1.0"
+__version__ = "0.2.4"
 
 
 def check_docker_image_exists(image_name: str) -> bool:
@@ -105,37 +105,74 @@ def ensure_docker_image(image_name: Optional[str] = None) -> None:
         logger.info(f"Docker image {versioned_image_name} not found. Building it now...")
         
         # Build the Docker image using the build_docker_image.sh script
-        script_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "build_docker_image.sh")
-        if os.path.exists(script_path):
-            try:
-                subprocess.run(
-                    [script_path, "--tag", __version__, "--name", base_name],
-                    check=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                )
-                logger.info(f"Successfully built Docker image: {versioned_image_name}")
-                
-                # Also tag as latest
+        # Try several possible locations for the build script
+        script_paths = [
+            os.path.join(os.path.dirname(__file__), "build_docker_image.sh"),  # Same directory as module
+            os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "build_docker_image.sh"),  # 3 levels up (development)
+            os.path.join(os.getcwd(), "build_docker_image.sh"),  # Current working directory
+        ]
+        
+        script_found = False
+        for script_path in script_paths:
+            if os.path.exists(script_path):
+                script_found = True
                 try:
+                    logger.info(f"Found build script at {script_path}")
+                    subprocess.run(
+                        [script_path, "--tag", __version__, "--name", base_name],
+                        check=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                    )
+                    logger.info(f"Successfully built Docker image: {versioned_image_name}")
+                    
+                    # Also tag as latest
+                    try:
+                        subprocess.run(
+                            ["docker", "tag", versioned_image_name, latest_image_name],
+                            check=True,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                        )
+                        logger.info(f"Tagged {versioned_image_name} as {latest_image_name}")
+                    except Exception as e:
+                        logger.warning(f"Error tagging image as latest: {e}")
+                    
+                    # Clean up old versions
+                    cleanup_old_images(base_name, __version__)
+                    break
+                except Exception as e:
+                    logger.warning(f"Failed to build Docker image with script {script_path}: {e}")
+                    continue
+        
+        if not script_found:
+            # If script isn't found, try to build directly using the Dockerfile in the package
+            dockerfile_path = os.path.join(os.path.dirname(__file__), "Dockerfile")
+            if os.path.exists(dockerfile_path):
+                try:
+                    logger.info(f"Building Docker image using Dockerfile at {dockerfile_path}")
+                    subprocess.run(
+                        ["docker", "build", "-t", versioned_image_name, "-f", dockerfile_path, os.path.dirname(dockerfile_path)],
+                        check=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                    )
+                    logger.info(f"Successfully built Docker image: {versioned_image_name}")
+                    
+                    # Tag as latest
                     subprocess.run(
                         ["docker", "tag", versioned_image_name, latest_image_name],
                         check=True,
                         stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE,
                     )
-                    logger.info(f"Tagged {versioned_image_name} as {latest_image_name}")
                 except Exception as e:
-                    logger.warning(f"Error tagging image as latest: {e}")
-                
-                # Clean up old versions
-                cleanup_old_images(base_name, __version__)
-            except Exception as e:
-                logger.warning(f"Failed to build Docker image: {e}")
-                logger.warning(f"Please build the Docker image manually using: {script_path} --tag {__version__} --name {base_name}")
-        else:
-            logger.warning(f"Build script not found at {script_path}")
-            logger.warning(f"Please build the Docker image manually using: docker build -t {versioned_image_name} -f src/lean_docker_mcp/Dockerfile .")
+                    logger.warning(f"Failed to build Docker image from Dockerfile: {e}")
+                    logger.warning(f"Please build the Docker image manually using: docker build -t {versioned_image_name} -f {dockerfile_path} .")
+            else:
+                logger.warning(f"Build script not found at {script_path}")
+                logger.warning(f"Dockerfile not found at {dockerfile_path}")
+                logger.warning(f"Please build the Docker image manually using: docker build -t {versioned_image_name} -f src/lean_docker_mcp/Dockerfile .")
     else:
         logger.info(f"Docker image {versioned_image_name} already exists.")
         
