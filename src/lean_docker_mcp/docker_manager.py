@@ -298,6 +298,7 @@ class DockerManager:
                     cpu_quota=int(self.config.docker.cpu_limit * 100000),
                     network_disabled=self.config.docker.network_disabled,
                     read_only=True,  # Make container read-only for security
+                    pull=False,  # Never pull the image, use local only
                     labels={
                         "lean_docker_mcp.pooled": "true",
                         "lean_docker_mcp.created": str(time.time())
@@ -649,8 +650,9 @@ exit $exit_code
                 mem_limit=self.config.docker.memory_limit,
                 cpu_quota=int(self.config.docker.cpu_limit * 100000),
                 network_disabled=self.config.docker.network_disabled,
-                remove=True,
-                detach=False,  # Run synchronously
+                pull=False,  # Never pull the image, use local only
+                remove=True,  # Run synchronously
+                detach=False,
             )
 
             # Decode the output
@@ -749,6 +751,7 @@ exit $exit_code
                 cpu_quota=int(self.config.docker.cpu_limit * 100000),
                 network_disabled=False,  # Initialize with network enabled for setup
                 read_only=False,  # Need to be writable for persistent sessions
+                pull=False,  # Never pull the image, use local only
                 detach=True,
                 labels={
                     "lean_docker_mcp.network_disabled": str(should_disable_network),

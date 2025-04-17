@@ -19,7 +19,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("lean-docker-mcp")
 
 # Package version
-__version__ = "0.2.4"
+__version__ = "0.2.5"
 
 
 def check_docker_image_exists(image_name: str) -> bool:

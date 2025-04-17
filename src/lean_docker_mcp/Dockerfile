@@ -41,7 +41,7 @@ WORKDIR /home/leanuser/project
 
 # Pre-install Mathlib for better performance
 # Initialize a project with Mathlib
-RUN echo '[package]\nname = "lean-docker-mcp"\nversion = "0.1"\nlean_version = "leanprover/lean4:stable"\n\n[dependencies]\nmathlib = {git = "https://github.com/leanprover-community/mathlib4.git"}' > lakefile.lean
+RUN echo '[package]\nname = "lean-docker-mcp"\nversion = "0.2.5"\nlean_version = "leanprover/lean4:stable"\n\n[dependencies]\nmathlib = {git = "https://github.com/leanprover-community/mathlib4.git"}' > lakefile.lean
 RUN echo 'import Mathlib\n\ndef main : IO Unit := IO.println "Hello, Lean4 with Mathlib!"' > Main.lean
 RUN lake update
 RUN lake build
