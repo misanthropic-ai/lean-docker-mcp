@@ -1,6 +1,6 @@
 [project]
 name = "lean-docker-mcp"
-version = "0.2.8"
+version = "0.2.9"
 description = "Dockerised Lean4 execution environment for AI agents"
 readme = "README.md"
 requires-python = ">=3.11"
