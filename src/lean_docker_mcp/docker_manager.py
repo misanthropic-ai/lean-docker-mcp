@@ -183,26 +183,19 @@ class DockerManager:
             self.client = docker.from_env()
             self.docker_available = True
             logger.info("Docker connection established successfully")
-            # Ensure Docker image exists locally; build from local Dockerfile if missing
+            # Ensure the required Docker image exists locally. All image build logic now lives in
+            # lean_docker_mcp.__init__.ensure_docker_image(), so we *only* check for existence here.
             try:
                 self.client.images.get(self.config.docker.image)
             except NotFound:
-                logger.info(f"Docker image {self.config.docker.image} not found locally; building from Dockerfile")
-                dockerfile_dir = os.path.dirname(__file__)
-                try:
-                    # Check if Dockerfile exists
-                    dockerfile_path = os.path.join(dockerfile_dir, "Dockerfile")
-                    if not os.path.exists(dockerfile_path):
-                        logger.warning(f"Dockerfile not found at {dockerfile_path}")
-                        raise FileNotFoundError(f"Dockerfile not found at {dockerfile_path}")
-                        
-                    # Build the Docker image
-                    logger.info(f"Building Docker image using Dockerfile at {dockerfile_path}")
-                    self.client.images.build(path=dockerfile_dir, dockerfile="Dockerfile", tag=self.config.docker.image)
-                    logger.info(f"Successfully built Docker image {self.config.docker.image}")
-                except Exception as e:
-                    logger.error(f"Failed to build Docker image: {e}")
-                    logger.warning(f"Please build the Docker image manually using: docker build -t {self.config.docker.image} -f src/lean_docker_mcp/Dockerfile .")
+                # Image is missing – we do *not* attempt to build it here anymore.
+                logger.warning(
+                    f"Docker image {self.config.docker.image} not found locally. "
+                    "Please build it first by calling lean_docker_mcp.ensure_docker_image() "
+                    "or by running the provided build script manually. Docker features will "
+                    "be unavailable until the image exists."
+                )
+                self.docker_available = False
         except Exception as e:
             logger.error(f"Docker is not available: {e}")
             logger.warning("Running with Docker unavailable - tool calls will return errors")
@@ -298,7 +291,6 @@ class DockerManager:
                     cpu_quota=int(self.config.docker.cpu_limit * 100000),
                     network_disabled=self.config.docker.network_disabled,
                     read_only=False,  # Make container read-only for security
-                    pull=False,  # Never pull the image, use local only
                     labels={
                         "lean_docker_mcp.pooled": "true",
                         "lean_docker_mcp.created": str(time.time())
@@ -650,7 +642,6 @@ exit $exit_code
                 mem_limit=self.config.docker.memory_limit,
                 cpu_quota=int(self.config.docker.cpu_limit * 100000),
                 network_disabled=self.config.docker.network_disabled,
-                pull=False,  # Never pull the image, use local only
                 remove=True,  # Run synchronously
                 detach=False,
             )
@@ -751,7 +742,6 @@ exit $exit_code
                 cpu_quota=int(self.config.docker.cpu_limit * 100000),
                 network_disabled=False,  # Initialize with network enabled for setup
                 read_only=False,  # Need to be writable for persistent sessions
-                pull=False,  # Never pull the image, use local only
                 detach=True,
                 labels={
                     "lean_docker_mcp.network_disabled": str(should_disable_network),
